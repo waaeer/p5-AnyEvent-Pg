@@ -1,5 +1,8 @@
 Revision history for Perl extension AnyEvent::Pg.
 
+0.16  Feb 18, 2017
+        - add transaction support to AnyEvent::Pg::Pool
+
 0.15  Oct 28, 2014
         - add AnyEvent::Pg method last_query_start_time (feature
           request by Yoran Heling)

@@ -22,11 +22,12 @@ else {
         plan skip_all => "Unable to load Test::PostgreSQL: $@";
     }
 
-    $tpg = eval { Test::PostgreSQL->new };
+    $tpg = eval { Test::PostgreSQL->new (Qextra_postmaster_args=>'-l /tmp/pg.log') };
     unless ($tpg) {
         no warnings;
         plan skip_all => "Test::PostgreSQL failed to provide a database instance: $@";
     }
+
 
 
     $port = $tpg->port;
@@ -132,7 +133,7 @@ sub ok_query_prepared {
 #
 
 
-plan tests => 28;
+plan tests => 97;
 diag "conninfo: " . Pg::PQ::Conn::_make_conninfo($ci);
 
 my $timer;
@@ -234,4 +235,92 @@ ok($elapsed <= $max_ok, "connection aborted after the given global_timeout")
 
 undef $pool;
 undef @w;
+
+#############################
+#
+# Transaction tests:
+#
+
+$cv = AnyEvent->condvar;
+my $cvt = AnyEvent->condvar;
+$pool = AnyEvent::Pg::Pool->new($ci, size=>3,
+        on_connect_error   => sub { $cv->send });
+
+my %seq;
+my $transaction_seq;
+
+sub pool_ok_query { 
+    my ($pool, $query, $last, $extra_check) = @_;
+
+    push @w, $pool->push_query(query => $query,
+         on_result => sub {
+            my $status = $_[2]->status;
+            $seq{$_[1]->{seq}} ++;
+            ok($status == PGRES_COMMAND_OK || $status== PGRES_TUPLES_OK , "Bad status in ".$status." '".(ref($query) ? join(' ',@$query) : $query)."'");
+            &$extra_check(@_) if $extra_check;
+            $cv->send if $last;
+         },
+         on_error => sub {
+            ok(0, 'Error in truncate table query');
+            $cv->send if $last;
+         },
+    );
+}
+
+my @extra_queries;
+
+pool_ok_query($pool, "truncate table foo" );
+pool_ok_query($pool, "create table bar(n int)" , 1);
+$cv->recv;
+
+$cv = AnyEvent->condvar;
+
+$pool->push_query(query=>'BEGIN TRANSACTION', on_result=> sub { 
+    my ($pg, $conn, $res) = @_;
+    $transaction_seq = $conn->{seq};
+    foreach my $j (11..13) { 
+        push @w, $conn->push_query(query=>['insert into foo values ($1::int,\'\')', $j],
+            on_result => sub { 
+                my ($conn, $res) = @_;
+                ok($res->status == PGRES_COMMAND_OK || $res->status == PGRES_TUPLES_OK, "Cannot insert in transaction $j");
+            },
+            on_error => sub { ok(0, "Error in transaction $j"); }
+        );
+        push @w, $conn->push_query(query=>'select pg_sleep(0.2)');
+    }    
+
+    push @w, $conn->push_query(query=>'COMMIT', 
+            on_result=>sub {
+                my ($conn, $res) = @_;
+                ok($res->status == PGRES_COMMAND_OK, "Cannot commit transaction");
+                $transaction_seq = undef;
+                $cvt->send;
+            },
+            on_error => sub { ok(0, "Error in transaction commit\n"); $cvt->send; }
+    );
+});
+        
+foreach my $i (1..20) { 
+    pool_ok_query($pool, ['insert into bar values($1::int)', $i], 0, sub { if(defined($transaction_seq) && $_[1]->{seq}== $transaction_seq) { push @extra_queries, $i }} );
+    pool_ok_query($pool, 'select pg_sleep(0.1)' , ($i==20),          sub { if(defined($transaction_seq) && $_[1]->{seq}== $transaction_seq) { push @extra_queries, $i }} );
+}
+
+$cv->recv;
+$cvt->recv;
+ok(3 == scalar (keys %seq ), sprintf('Bad number of connections %d used, should be 3', scalar (keys %seq )));
+ok(0 == scalar (@extra_queries), 'Extra queries in transaction connection');
+
+%seq = ();
+$cv = AnyEvent->condvar;
+
+foreach my $i (21..30) { 
+    pool_ok_query($pool, ['insert into bar values($1::int)', $i] );
+    pool_ok_query($pool, 'select pg_sleep(0.1)' , ($i==30) );
+}
+
+$cv->recv;
+ok(3 == scalar (keys %seq ), sprintf('Bad number of connections %d used (transaction did not release connection?), should be 3', scalar (keys %seq )));
+
+
+exit(0);
 

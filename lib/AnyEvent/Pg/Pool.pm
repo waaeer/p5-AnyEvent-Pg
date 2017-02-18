@@ -1,6 +1,6 @@
 package AnyEvent::Pg::Pool;
 
-our $VERSION = '0.14';
+our $VERSION = '0.15';
 
 use strict;
 use warnings;
@@ -45,6 +45,7 @@ sub new {
     my $connection_delay = delete $opts{connection_delay} // $default{connection_delay};
     my $timeout = delete $opts{timeout} // $default{timeout};
     my $global_timeout = delete $opts{global_timeout};
+    my $transaction_timeout = delete $opts{transaction_timeout};
     my $on_error = delete $opts{on_error} ;
     my $on_connect_error = delete $opts{on_connect_error};
     my $on_transient_error = delete $opts{on_transient_error};
@@ -60,6 +61,7 @@ sub new {
                  conn_retries => 0,
                  conn_delay => $connection_delay,
                  global_timeout => $global_timeout,
+                 transaction_timeout => $transaction_timeout || 90, #default is 90 seconds
                  conns => {},
                  current => {},
                  busy => {},
@@ -375,6 +377,11 @@ sub _on_query_result {
             }
         }
         $query->{max_retries} = 0;
+        if ($query->{query} =~ /^\s*BEGIN\b/i) {
+            $conn->{in_transaction} = 1;
+            # Setup a timeout for the transaction...
+            $conn->{transaction_delay_watcher} = AE::timer $pool->{transaction_timeout}, 0, weak_method_callback($conn, '_on_delayed_transaction');
+        }
         $pool->_maybe_callback($query, 'on_result', $conn, $result);
     }
 }
@@ -387,7 +394,9 @@ sub _requeue_query {
 
 sub _on_query_done {
     my ($pool, $seq, $conn) = @_;
+
     my $query = delete $pool->{current}{$seq};
+
     if (delete $query->{retry}) {
         $debug and $debug & 8 and $pool->_debug("unshifting failed query into queue");
         $query->{max_retries}--;
@@ -567,20 +576,23 @@ sub _on_conn_empty_queue {
     my ($pool, $seq, $conn) = @_;
     $debug and $debug & 8 and $pool->_debug("conn $conn queue is now empty, seq: $seq");
 
-    unless (delete $pool->{busy}{$seq} or
-            delete $pool->{connecting}{$seq} or
-            delete $pool->{initializing}{$seq}) {
-        if ($debug) {
-            $pool->_debug("pool object: \n" . Dumper($pool));
-            die "internal error: empty_queue callback invoked by object not in state busy, connecting or initializing, seq: $seq";
+    if(!$conn->{in_transaction}) {  # if connection is in transaction state, do not return it to the pool.
+
+        unless (delete $pool->{busy}{$seq} or
+                delete $pool->{connecting}{$seq} or
+                delete $pool->{initializing}{$seq}) {
+            if ($debug) {
+                $pool->_debug("pool object: \n" . Dumper($pool));
+                die "internal error: empty_queue callback invoked by object not in state busy, connecting or initializing, seq: $seq";
+            }
         }
-    }
 
-    if (defined ($pool->{init_queue})) {
-        $pool->_check_init_queue($seq) and return;
-    }
+        if (defined ($pool->{init_queue})) {
+           $pool->_check_init_queue($seq) and return;
+        }
 
-    $pool->{idle}{$seq} = 1;
+        $pool->{idle}{$seq} = 1;
+    }
     $pool->_check_queue;
 }
 
@@ -690,6 +702,10 @@ pool is considered dead and the C<on_error> callback will be called.
 Note that this timeout is approximate. It is checked every time a new
 connection attempt fails but its expiration will not cause the
 abortion of an in-progress connection.
+
+=item transaction_timeout => $seconds
+
+Maximum allowed transaction duration. See TRANSACTION SUPPORT for details.
 
 =item on_error => $callback
 
@@ -838,6 +854,36 @@ See the constructor documentation for the list of parameters that can
 be changed.
 
 =back
+
+=head1 TRANSACTION SUPPORT
+
+In general, special effort is needed to perform a transaction of 
+several statements through a connection pool, as the pool itself 
+does not guarantee that these statements are performed in single connection.
+
+So, to perform a transaction, you need to take one connection from pool, 
+execute all the transaction statements in it, and then return the 
+connection back to the pool.
+
+In AnyEvent::Pg::Pool his is done as follows.
+
+Executing a query starting with <BEGIN> takes one connection from the pool, 
+and allows you to work with it with AnyEvent::Pg. After you C<COMMIT>
+or C<ROLLBACK> (excluding C<ROLLBACK TO SAVEPOINT>) the transaction, the 
+connection is returned back to the pool.
+
+Transaction execution is limited in time by C<transaction_timeout> parameter,
+which is 90 seconds by default.
+
+=head2 Transaction example
+
+ $pool->push_query(query=>'BEGIN TRANSACTION', on_result=> sub { 
+    my ($pg, $conn, $res) = @_;
+    push @w, $conn->push_query(query=>'INSERT INTO foo VALUES (1,2,3)');
+    push @w, $conn->push_query(query=>'COMMIT');
+ });
+
+Of course, you may use callback chains inside a transaction.
 
 =head1 SEE ALSO
 

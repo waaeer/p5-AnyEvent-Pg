@@ -1,6 +1,6 @@
 package AnyEvent::Pg;
 
-our $VERSION = 0.15;
+our $VERSION = 0.16;
 
 use 5.010;
 use strict;
@@ -420,6 +420,10 @@ sub _on_consume_input {
                 else {
                     $debug and $debug & 2 and $self->_debug("calling on_done");
                     $self->_maybe_callback($cq, 'on_done');
+                    if ($self->{current_query}->{args}->[0] =~ /^(COMMIT|ROLLBACK)\s*(WORK|TRANSACTION)?\s*$/i) {
+                        undef $self->{in_transaction};
+                        undef $self->{transaction_delay_watcher};
+                    }
                     undef $self->{current_query};
                     $self->_on_push_query;
                     return;
@@ -441,6 +445,15 @@ sub _on_timeout {
 sub destroy {
     my $self = shift;
     %$self = ();
+}
+
+sub _on_delayed_transaction { 
+    my ($self) = @_;
+    $self->{timedout} = 1;
+    delete $self->{transaction_delay_watcher};
+    warn "Transaction timed out in $self->{seq}\n";
+    $self->_on_fatal_error
+
 }
 
 package AnyEvent::Pg::Watcher;
