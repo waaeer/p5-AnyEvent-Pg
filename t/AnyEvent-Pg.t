@@ -279,14 +279,14 @@ $pool->push_query(query=>'BEGIN TRANSACTION', on_result=> sub {
     my ($pg, $conn, $res) = @_;
     $transaction_seq = $conn->{seq};
     foreach my $j (11..13) { 
-        push @w, $conn->push_query(query=>['insert into foo values ($1::int,\'\')', $j],
+		$conn->push_query(query=>['INSERT INTO foo VALUES ($1::int,\'\')', $j],
             on_result => sub { 
                 my ($conn, $res) = @_;
                 ok($res->status == PGRES_COMMAND_OK || $res->status == PGRES_TUPLES_OK, "Cannot insert in transaction $j");
             },
             on_error => sub { ok(0, "Error in transaction $j"); }
         );
-        push @w, $conn->push_query(query=>'select pg_sleep(0.2)');
+        $conn->push_query(query=>'SELECT pg_sleep(0.2)');
     }    
 
     push @w, $conn->push_query(query=>'COMMIT', 
@@ -301,8 +301,8 @@ $pool->push_query(query=>'BEGIN TRANSACTION', on_result=> sub {
 });
         
 foreach my $i (1..20) { 
-    pool_ok_query($pool, ['insert into bar values($1::int)', $i], 0, sub { if(defined($transaction_seq) && $_[1]->{seq}== $transaction_seq) { push @extra_queries, $i }} );
-    pool_ok_query($pool, 'select pg_sleep(0.1)' , ($i==20),          sub { if(defined($transaction_seq) && $_[1]->{seq}== $transaction_seq) { push @extra_queries, $i }} );
+    pool_ok_query($pool, ['INSERT INTO bar VALUES ($1::int)', $i], 0, sub { if(defined($transaction_seq) && $_[1]->{seq}== $transaction_seq) { push @extra_queries, $i }} );
+    pool_ok_query($pool, 'SELECT pg_sleep(0.1)' , ($i==20),          sub { if(defined($transaction_seq) && $_[1]->{seq}== $transaction_seq) { push @extra_queries, $i }} );
 }
 
 $cv->recv;
@@ -314,8 +314,8 @@ ok(0 == scalar (@extra_queries), 'Extra queries in transaction connection');
 $cv = AnyEvent->condvar;
 
 foreach my $i (21..30) { 
-    pool_ok_query($pool, ['insert into bar values($1::int)', $i] );
-    pool_ok_query($pool, 'select pg_sleep(0.1)' , ($i==30) );
+    pool_ok_query($pool, ['INSERT INTO bar VALUES ($1::int)', $i] );
+    pool_ok_query($pool, 'SELECT pg_sleep(0.1)' , ($i==30) );
 }
 
 $cv->recv;

@@ -378,7 +378,7 @@ sub _on_query_result {
         }
         $query->{max_retries} = 0;
         if ($query->{query} =~ /^\s*BEGIN\b/i) {
-            $conn->{in_transaction} = 1;
+            $conn->{in_transaction} = [];
             # Setup a timeout for the transaction...
             $conn->{transaction_delay_watcher} = AE::timer $pool->{transaction_timeout}, 0, weak_method_callback($conn, '_on_delayed_transaction');
         }

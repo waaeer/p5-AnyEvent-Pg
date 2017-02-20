@@ -241,7 +241,12 @@ sub _push_query {
 
     $self->{current_query} or &AE::postpone(weak_method_callback_cached($self, '_on_postponed_push_query'));
 
-    AnyEvent::Pg::Watcher->_new($query);
+    my $watcher = AnyEvent::Pg::Watcher->_new($query);
+    if($self->{in_transaction}) { 
+        push @{ $self->{in_transaction} }, $watcher; 
+    }
+
+    return $watcher;
 }
 
 sub _on_postponed_push_query {
@@ -451,7 +456,6 @@ sub _on_delayed_transaction {
     my ($self) = @_;
     $self->{timedout} = 1;
     delete $self->{transaction_delay_watcher};
-    warn "Transaction timed out in $self->{seq}\n";
     $self->_on_fatal_error
 
 }
